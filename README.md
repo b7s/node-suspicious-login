@@ -126,4 +126,4 @@ The duplication gate checks blocks of at least four lines and 25 tokens.
 
 ## Releases
 
-Every push to `develop` runs CI. After all jobs pass, the release job uses Conventional Commits since the last tag. `fix:` and `perf:` bump the patch version, `feat:` bumps the minor version, and `!` or a `BREAKING CHANGE:` footer bumps the major version. Documentation, tests, and CI changes alone do not trigger a new version. GitHub Releases include an npm tarball with the release version in its manifest.
+CI runs on every push. After all jobs pass on `main`, the release job uses Conventional Commits since the last tag. `fix:` and `perf:` bump the patch version, `feat:` bumps the minor version, and `!` or a `BREAKING CHANGE:` footer bumps the major version. Documentation, tests, and CI changes alone do not trigger a new version. GitHub Releases include an npm tarball with the release version in its manifest.

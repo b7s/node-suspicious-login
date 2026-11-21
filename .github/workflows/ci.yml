@@ -36,13 +36,13 @@ jobs:
       - run: bun test tests/storage tests/adapters tests/checks
 
   release:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [node, bun]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     concurrency:
-      group: develop-release
+      group: main-release
     steps:
       - uses: actions/checkout@v4
         with:

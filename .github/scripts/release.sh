@@ -2,7 +2,7 @@
 set -euo pipefail
 
 git fetch --tags origin
-if [[ "$(git ls-remote origin refs/heads/develop | cut -f1)" != "$GITHUB_SHA" ]]; then
+if [[ "$(git ls-remote origin refs/heads/main | cut -f1)" != "$GITHUB_SHA" ]]; then
   echo "A newer push superseded this release run."
   exit 0
 fi

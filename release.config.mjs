@@ -4,7 +4,7 @@ const parserOpts = {
 };
 
 export default {
-  branches: ["develop"],
+  branches: ["main"],
   plugins: [
     ["@semantic-release/commit-analyzer", { parserOpts }],
     ["@semantic-release/release-notes-generator", { parserOpts }],
