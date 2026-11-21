@@ -1,59 +1,62 @@
 # node-suspicious-login
 
-Framework-independent suspicious login scoring for Node.js 22.13+, 24 and 26, and Bun 1.4.4. An Express adapter is included; Nest on Express can use it and Fastify can call the core. SQLite is the default, while applications may supply another storage adapter.
+Score login attempts and block high-risk sign-ins before issuing a session. The package includes an Express adapter, a framework-independent API for Nest and Fastify, and transactional SQLite storage.
 
-## Installation and startup
+[Quick start](#quick-start) · [GeoLite2 City](#geolite2-city) · [Risk and actions](#risk-and-actions) · [Storage](#storage) · [Quality checks](#quality-checks)
+
+## Quick start
+
+The CI matrix covers Node.js 22.13.0, 22.x, 24.x, 26.x, and Bun 1.4.4. Install from GitHub's `develop` branch.
 
 ```sh
-npm install node-suspicious-login
+npm install github:b7s/node-suspicious-login#develop
 ```
 
-Authenticate credentials **before** calling the detector, but do not issue a session, cookie or token until the detector returns `allowed: true`. Never take the account ID, authentication outcome or trusted device ID directly from an unverified client field. Configure trusted proxies in the framework before using its resolved IP.
+Open the detector once at startup. This example uses an ES module and assumes the application supplies `authenticateCredentials` and `issueToken`.
 
 ```js
-const { randomUUID } = require("crypto");
-const { SuspiciousLogin } = require("node-suspicious-login");
+import { randomUUID } from "node:crypto";
+import suspiciousLogin from "node-suspicious-login";
 
-// At application startup. GeoLite2 is optional: omit geoLite2Path to disable location.
-const detector = await SuspiciousLogin.open({
-  dbPath: "./suspicious-login.sqlite",
-  geoLite2Path: "/data/GeoLite2-City.mmdb",
-  onEffectError: (error) => logger.error(error),
-});
+const { SuspiciousLogin, createMiddleware } = suspiciousLogin;
+const detector = await SuspiciousLogin.open();
 
-// After your own password/MFA verification, before creating the session:
-const auth = await authenticateCredentials(request); // application function
-const result = await detector.detect({
-  attemptId: randomUUID(), // reuse the same ID only for a retry of this attempt
-  userId: auth.userId ?? null, // null for an unknown account
-  credentialsValid: auth.valid,
-  ip: request.ip,
-  userAgent: request.headers["user-agent"],
-  deviceId: auth.verifiedDeviceId, // optional opaque, persistent application identifier
-  email: auth.verifiedEmail, // optional address obtained from the account
-});
-if (!result.allowed) return denyLogin();
-return issueSession(auth.userId);
+async function login(request) {
+  const auth = await authenticateCredentials(request);
+  const result = await detector.detect({
+    attemptId: randomUUID(),
+    userId: auth.userId ?? null,
+    credentialsValid: auth.valid,
+    ip: request.ip,
+    userAgent: request.headers["user-agent"],
+    deviceId: auth.verifiedDeviceId,
+    email: auth.verifiedEmail,
+  });
 
-// On graceful application shutdown:
-await detector.close();
+  if (!auth.valid) return { status: 401 };
+  if (!result.allowed) return { status: 403 };
+  return { status: 200, token: await issueToken(auth.userId) };
+}
 ```
 
-The snippets illustrate integration points; `logger`, credential verification and session issuance belong to the application. Invalid credentials are recorded with score zero and cannot be allowed. Storage and calculation failures reject with `SuspiciousLogin.DetectionError`; handle them as an operational error without issuing a session. `attemptId` must be unique per attempt and stable across retries. A repeated ID returns the persisted decision without inserting another row or dispatching effects again. A different account or credentials result for the same ID is rejected.
+Supply a string account ID from server-side authentication, or `null` for an unknown account. Device ID and verified email are optional. Configure trusted proxies before using the framework's resolved IP. Use a unique `attemptId` per attempt and keep it stable across retries. Replays return the stored decision and skip notifications.
 
-## Express and Nest
+Allow session creation only after `allowed: true`. Handle detection errors as operational failures, for example with HTTP 503, and call `await detector.close()` at shutdown.
 
-Run authentication inside the resolver or earlier trusted server-side middleware. The adapter does not read identity or success flags from the request body. Route handlers after it may issue sessions only after `req.suspiciousLogin.allowed` is true.
+### Express and Nest
+
+Use the Express adapter with a server-side authentication resolver. Nest with the Express platform can use the same adapter, or call `detect` after validating credentials.
 
 ```js
-const { createMiddleware } = require("node-suspicious-login");
 app.post("/login", createMiddleware(detector, {
-  resolveAuthentication: async (req) => {
+  async resolveAuthentication(req) {
     const auth = await authenticateCredentials(req);
     req.authenticatedUserId = auth.userId;
     return {
-      attemptId: randomUUID(), userId: auth.userId ?? null,
-      credentialsValid: auth.valid, deviceId: auth.verifiedDeviceId,
+      attemptId: randomUUID(),
+      userId: auth.userId ?? null,
+      credentialsValid: auth.valid,
+      deviceId: auth.verifiedDeviceId,
       email: auth.verifiedEmail,
     };
   },
@@ -64,69 +67,59 @@ app.post("/login", createMiddleware(detector, {
     next(error);
   }
 });
-
-// Register an application error handler after routes. Never issue a session here.
-app.use((error, req, res, next) => {
-  logger.error(error);
-  res.status(503).json({ error: "Login temporarily unavailable" });
-});
 ```
 
-Invalid credentials receive 401, blocked attempts receive a generic 403, and errors are forwarded to Express. Nest using its Express adapter can register the same middleware before the login handler, or call `detect` directly after authentication. The previous `userIdField`/`successField` middleware options have been removed: migrate by supplying `resolveAuthentication` and moving session creation after this middleware.
+The adapter returns 401 for invalid credentials, 403 for blocked logins, and forwards errors to the application's Express error handler. The decision is available as `req.suspiciousLogin`. When upgrading, replace the old `userIdField` and `successField` options with `resolveAuthentication`. [Express and Nest tests](tests/adapters/frameworks.test.js)
 
-## Fastify and other frameworks
+### Fastify and other frameworks
 
-Call the same core after authentication and before issuing a session:
+Use the core example in your login handler and map its result to your framework's response. Issue the session only after the detector allows the attempt. [Fastify integration test](tests/adapters/frameworks.test.js)
+
+## GeoLite2 City
+
+Download the free `GeoLite2-City.mmdb` database using a MaxMind account and keep it up to date. [MaxMind GeoLite2 download and setup](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data/)
 
 ```js
-fastify.post("/login", async (req, reply) => {
-  const auth = await authenticateCredentials(req);
-  const result = await detector.detect({
-    attemptId: randomUUID(), userId: auth.userId ?? null,
-    credentialsValid: auth.valid, ip: req.ip,
-    userAgent: req.headers["user-agent"], deviceId: auth.verifiedDeviceId,
-    email: auth.verifiedEmail,
-  });
-  if (!auth.valid) return reply.code(401).send({ error: "Authentication failed" });
-  if (!result.allowed) return reply.code(403).send({ error: "Login denied" });
-  return { token: await issueToken(auth.userId) };
+const detector = await SuspiciousLogin.open({
+  geoLite2Path: "/data/GeoLite2-City.mmdb",
 });
 ```
 
-Install an error handler that responds with an operational error (for example 503) and does not issue a session when `detect` throws. The same pattern works in Bun. The package does not validate credentials or issue sessions itself.
+Lookups run locally. With no provider configured, scoring continues without location signals. An unreadable database fails at startup. Lookup failures and timeouts leave location unknown.
 
-## Geolocation
-
-GeoLite2 City is the built-in local provider when `geoLite2Path` is supplied to `SuspiciousLogin.open`. Obtain the free database from a MaxMind account, observe its terms and update it regularly. The file is not included. Initialization fails if the configured database cannot be opened. Per-IP lookup failures or timeouts leave location unknown; no online lookup is enabled by default. Configure `locationTimeoutMs` (default 1000 ms).
-
-Alternatively pass an `ipProvider` with `async lookup(ip, { signal })`, returning `{ country, city, latitude, longitude, accuracyRadiusKm }` or `null`. Country must be an ISO uppercase two-letter code; coordinates and a non-negative accuracy radius are required for travel scoring. Services, local MMDB files or a custom IPv4/IPv6 range database can implement this interface. The detector passes an `AbortSignal` at lookup and aborts it on timeout. Forward it to remote requests so they can stop promptly. Invalid credentials and stored replays skip lookup. No history migration is required to replace the provider.
+To use another service or your own IP database, pass an `ipProvider` with `lookup(ip, { signal })`. Return `null` for unknown locations or an object with an uppercase two-letter `country` code. Include `latitude`, `longitude`, and `accuracyRadiusKm` for travel scoring. Forward the abort signal to remote requests. The default timeout is 1,000 ms, configurable with `locationTimeoutMs`. Changing providers requires no history migration.
 
 ## Risk and actions
 
-Only successful, unblocked, non-legacy logins within the last 90 days establish recognized devices, IPs and countries. The first eligible login does not receive novelty points, but recent failure signals still apply. The first observed country and the first observed device each establish a baseline without adding points, including when the relevant data was missing from earlier logins. Device IDs are provided by the application. Between new IP (10), new country (30) and impossible travel (40), only the highest score applies. Travel compares the latest eligible location with coordinates and accuracy, subtracts both uncertainty radii, and requires minimum distance greater than 500 km and speed greater than 900 km/h. A suspicious user agent adds 20 and a new device adds 25.
+| Preset | Medium | High |
+| --- | ---: | ---: |
+| `defaultPreset` | 40 | 70 |
+| `adminPreset` | 25 | 50 |
 
-By default, five failures for one account in 15 minutes add 35; ten failures across at least five known accounts from one IP in 15 minutes add 40. Only the higher of these two signals applies. These are starting values; tune them against real traffic. The default preset classifies medium at 40 and high at 70; admin uses 25 and 50. High risk is blocked by the preset regardless of notification configuration.
+Both presets block high-risk attempts. Medium and high risk can send email when `actions.notify_user` is configured with `new actions.notifyUser({ transporter, from })` and the application supplies a verified email. Effects run after the decision is stored. Subscribe to `SuspiciousLoginDetected` for events and use `onEffectError` to report failures.
 
-Use `risk: { recognitionDays, failureWindowMinutes, failureThreshold, ipFailureThreshold, ipAccountThreshold }` to override positive integer windows and counts. Use `weights: { new_ip: 5, new_country: 20 }` to override individual non-negative signal weights. For thresholds or actions, pass a preset instance with `thresholds` and `actionsForLevel(level)`. Invalid settings fail at initialization.
+- Only allowed logins with valid credentials establish a baseline. The first observed device or country adds no novelty points. The default recognition window is 90 days.
+- Only the highest of new IP, new country, and impossible travel counts. Travel scoring subtracts the uncertainty at both locations and requires more than 500 km at over 900 km/h.
+- In the default 15-minute window, repeated failures trigger at five for one account. Credential stuffing triggers at ten failures from one IP across at least five known accounts. Only the stronger failure signal counts. Invalid credentials are logged with score zero.
 
-Effects run after persistence and do not hold up the decision. Configure `actions.notify_user` with `new actions.notifyUser({ transporter, from })`, where `transporter` is a Nodemailer transport. Only a verified `email` supplied by the application is used. Configure `actions.custom_action` and its preset mapping for callbacks. Subscribe with `detector.on("SuspiciousLoginDetected", listener)`. Failures reach `onEffectError`, or a process warning by default. Effects are best effort: use an application-managed durable outbox if delivery guarantees are required.
+Pass a `preset` to change thresholds and actions. Use `risk` for [windows and counts](src/core/config.js) and `weights` for individual signal weights, for example `{ new_ip: 5 }`. See the [environment configuration example](config/example.env) for SQLite, GeoLite2, and SMTP settings.
 
-## Storage and migration
+## Storage
 
-The default database is `./suspicious-login.sqlite` (override with `dbPath`). Startup opens and migrates it; call `close()` on shutdown. Transactions use SQLite's rollback journal, `BEGIN IMMEDIATE` and a bounded busy timeout. Use one local database file only on a local filesystem; multiple hosts or replicas need a shared database through a custom adapter. Retention is not automatic: schedule `await detector.storage.prune({ before: utcIsoTimestamp, limit: 1000 })` if desired.
+SQLite uses `./suspicious-login.sqlite` by default. Set `dbPath` to change it. Opening the built-in store applies migrations and preserves legacy records for audit. Legacy records are excluded from scoring. Schedule `detector.storage.prune({ before, limit })` to clean up old records in batches.
 
-The migration preserves old IDs, timestamps, scores, decisions and reasons, including malformed raw reason values, and marks old records as legacy. Legacy rows remain auditable but do not establish trusted history or count toward new risk calculations because the old middleware trusted client-provided identity and success. Migration is transactional and repeatable. Back up the database before upgrading and test the migration with your own data.
+For replicas on multiple hosts, pass a `storage` adapter backed by a shared database. Run its migrations at startup and make `withTransaction` commit decisions atomically and serialize conflicting account and IP updates. [Storage contract](src/core/storage/base.js) · [Custom adapter example](tests/storage/customAdapter.test.js) · [Transaction queries](src/core/storage/sqliteQueries.js)
 
-A custom `storage` implements `migrate()`, `withTransaction(async tx => ...)`, `prune({before, limit})`, and `close()`; methods may be asynchronous. `withTransaction` must atomically commit or roll back the callback and serialize conflicting account/IP decisions, including across replicas. Migrations and indexes are the adapter's responsibility. Its transaction object provides:
+## Quality checks
 
-- `decision(attemptId)` returns the stored row or null; `insert(row)` stores a row with unique `attempt_id`.
-- `hasEligible(userId, since)` and `known(field, userId, value, since)` return booleans. Fields are `ip`, `country` and `device`; only valid, unblocked, non-legacy successes count. `hasObserved(field, userId, since)` reports whether any eligible login supplied a nonempty value for `country` or `device`.
-- An optional storage-level `readDecision(attemptId)` may return the same committed row as `tx.decision` before a location lookup. The detector uses a transaction for this read when the adapter omits the method.
-- `lastLocated(userId, since)` returns the newest eligible row with coordinates and accuracy, ordered by UTC `created_at` and ID, or null.
-- `failureCount(userId, since, until, limit)`, `ipFailures(ip, since, until, limit)` and `ipAccounts(ip, since, until, limit)` return counts capped at the given limit, counting non-legacy failed attempts in the inclusive UTC window. IP counts include only known account IDs; `ipAccounts` counts distinct IDs.
+[CI](.github/workflows/ci.yml) runs the full Node.js test suite and Bun's storage, adapter, and scoring checks. Tests cover session issuance after risk checks, SQLite migration and persistence, replay handling, and false-positive scenarios.
 
-Rows use the snake_case fields in `src/core/scoring/transaction.js`; `reasons` is a JSON string. Preserve decision fields on lookup. The included SQLite and memory adapters illustrate the contract. The memory adapter is for tests, not durable or shared production use.
+| Check | Command |
+| --- | --- |
+| Install locked dependencies | `npm ci` |
+| Tests | `npm test -- --runInBand` |
+| Lint and complexity limit of 5 | `npm run lint` |
+| Duplication gate at 0% in `src/` | `npm run duplication` |
+| On-disk SQLite benchmark at 10k and 100k records | `node benchmarks/sqlite.js` |
 
-## Verification
-
-Run `npm test -- --runInBand`, `npm run lint`, and `npm run duplication`. The duplication gate checks blocks of at least four lines and 25 tokens in `src/` with a 0% threshold. CI runs Node 22.13, current 22/24/26 and Bun 1.4.4. Run `node benchmarks/sqlite.js` for a local on-disk 10k/100k history, one/two-connection latency, and 10k/100k recent failures against one account. Results depend on hardware and filesystem.
+The duplication gate checks blocks of at least four lines and 25 tokens.
