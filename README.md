@@ -6,10 +6,10 @@ Score login attempts and block high-risk sign-ins before issuing a session. The 
 
 ## Quick start
 
-The CI matrix covers Node.js 22.13.0, 22.x, 24.x, 26.x, and Bun 1.4.4. Install from GitHub's `develop` branch.
+The CI matrix covers Node.js 22.13.0, 22.x, 24.x, 26.x, and Bun 1.4.4. Install a versioned package from [GitHub Releases](https://github.com/b7s/node-suspicious-login/releases).
 
 ```sh
-npm install github:b7s/node-suspicious-login#develop
+npm install https://github.com/b7s/node-suspicious-login/releases/download/v0.1.0/node-suspicious-login-0.1.0.tgz
 ```
 
 Open the detector once at startup. This example uses an ES module and assumes the application supplies `authenticateCredentials` and `issueToken`.
@@ -123,3 +123,7 @@ For replicas on multiple hosts, pass a `storage` adapter backed by a shared data
 | On-disk SQLite benchmark at 10k and 100k records | `node benchmarks/sqlite.js` |
 
 The duplication gate checks blocks of at least four lines and 25 tokens.
+
+## Releases
+
+Every push to `develop` runs CI. After all jobs pass, the release job uses Conventional Commits since the last tag. `fix:` and `perf:` bump the patch version, `feat:` bumps the minor version, and `!` or a `BREAKING CHANGE:` footer bumps the major version. Documentation, tests, and CI changes alone do not trigger a new version. GitHub Releases include an npm tarball with the release version in its manifest.
