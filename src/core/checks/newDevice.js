@@ -1,13 +1,8 @@
 "use strict";
-
-const BaseCheck = require("./base");
-
-class NewDeviceCheck extends BaseCheck {
-  async run({ history, current }) {
-    const known = history.some((h) => h.device === current.device);
-    if (known) return { pontos: 0, motivo: null };
-    return { pontos: 25, motivo: "new_device" };
+class NewDeviceCheck {
+  run({ current, evidence }) {
+    if (evidence.hasDeviceHistory && current.deviceId && !evidence.knownDevice) return { pontos: 25, motivo: "new_device" };
+    return { pontos: 0, motivo: null };
   }
 }
-
 module.exports = NewDeviceCheck;

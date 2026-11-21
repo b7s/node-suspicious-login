@@ -1,41 +1,16 @@
-const ImpossibleTravelCheck = require("../../src/core/checks/impossibleTravel");
-
-const recent = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
-const old = new Date(Date.now() - 10 * 60 * 60 * 1000).toISOString();
-
-test("flags impossible travel within 4 hours", async () => {
-  const check = new ImpossibleTravelCheck();
-  const result = await check.run({
-    history: [{ country: "US", created_at: recent }],
-    current: { country: "BR", created_at: new Date().toISOString() },
-  });
-  expect(result.pontos).toBe(40);
-  expect(result.motivo).toBe("impossible_travel");
+const Check = require("../../src/core/checks/impossibleTravel");
+const now = "2026-01-02T12:00:00.000Z";
+const brazil = {latitude: -23.55, longitude: -46.63, accuracyRadiusKm: 10, createdAt: "2026-01-02T11:00:00.000Z"};
+const usa = {latitude: 40.71, longitude: -74, accuracyRadiusKm: 10, createdAt: now};
+test("detects implausible long distance travel with accuracy radii", () => {
+  const check = new Check();
+  expect(check.run({current: usa, evidence: {lastLocated: brazil}}).pontos).toBe(40);
+  expect(check.run({current: {...usa, accuracyRadiusKm: 10000}, evidence: {lastLocated: brazil}}).pontos).toBe(0);
+  expect(check.run({current: {...usa, createdAt: "2026-01-04T12:00:00.000Z"}, evidence: {lastLocated: brazil}}).pontos).toBe(0);
 });
-
-test("allows travel after 4 hours", async () => {
-  const check = new ImpossibleTravelCheck();
-  const result = await check.run({
-    history: [{ country: "US", created_at: old }],
-    current: { country: "BR" },
-  });
-  expect(result.pontos).toBe(0);
-});
-
-test("returns zero when countries match", async () => {
-  const check = new ImpossibleTravelCheck();
-  const result = await check.run({
-    history: [{ country: "US", created_at: recent }],
-    current: { country: "US" },
-  });
-  expect(result.pontos).toBe(0);
-});
-
-test("returns zero when no history", async () => {
-  const check = new ImpossibleTravelCheck();
-  const result = await check.run({
-    history: [],
-    current: { country: "BR" },
-  });
-  expect(result.pontos).toBe(0);
+test("does not infer impossible travel without accurate coordinates or across nearby borders", () => {
+  const check = new Check();
+  expect(check.run({current: {country: "US"}, evidence: {lastLocated: brazil}}).pontos).toBe(0);
+  expect(check.run({current: {...brazil, longitude: -46, createdAt: now}, evidence: {lastLocated: brazil}}).pontos).toBe(0);
+  expect(check.run({current: usa, evidence: {lastLocated: null}}).pontos).toBe(0);
 });

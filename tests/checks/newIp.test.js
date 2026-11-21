@@ -1,21 +1,7 @@
-const NewIpCheck = require("../../src/core/checks/newIp");
-
-test("returns points for a new IP", async () => {
-  const check = new NewIpCheck();
-  const result = await check.run({
-    history: [],
-    current: { ip: "1.2.3.4" },
-  });
-  expect(result.pontos).toBe(10);
-  expect(result.motivo).toBe("new_ip");
-});
-
-test("returns zero points for a known IP", async () => {
-  const check = new NewIpCheck();
-  const result = await check.run({
-    history: [{ ip: "1.2.3.4" }],
-    current: { ip: "1.2.3.4" },
-  });
-  expect(result.pontos).toBe(0);
-  expect(result.motivo).toBeNull();
+const Check = require("../../src/core/checks/newIp");
+test("new IP is scored only when trusted history exists", () => {
+  const check = new Check();
+  expect(check.run({current: {ip: "2"}, evidence: {hasEligible: true, knownIp: false}}).pontos).toBe(10);
+  expect(check.run({current: {ip: "2"}, evidence: {hasEligible: true, knownIp: true}}).pontos).toBe(0);
+  expect(check.run({current: {ip: "2"}, evidence: {hasEligible: false}}).pontos).toBe(0);
 });

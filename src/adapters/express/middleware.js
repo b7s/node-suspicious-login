@@ -1,53 +1,31 @@
 "use strict";
 
-function extractUserId(req, field) {
-  return req.body?.[field] ?? req.query?.[field];
-}
-
-function extractIp(req) {
-  return req.ip || req.connection?.remoteAddress || "";
-}
-
-function extractUserAgent(req) {
-  return req.get("user-agent") || "";
-}
-
-function respondBlocked(res, result, onBlock) {
-  if (onBlock) return onBlock(null, res, null, result);
-  return res.status(403).json({ blocked: true, score: result.score, level: result.level, reasons: result.reasons });
-}
-
-async function runDetection(suspiciousLogin, req, userIdField, successField) {
-  return await suspiciousLogin.detect({
-    userId: extractUserId(req, userIdField),
-    ip: extractIp(req),
-    userAgent: extractUserAgent(req),
-    success: req.body?.[successField] ?? false,
+async function runDetection(detector, resolver, req) {
+  const auth = await resolver(req);
+  if (!auth || typeof auth.credentialsValid !== "boolean") throw new TypeError("Invalid authentication result");
+  const result = await detector.detect({
+    attemptId: auth.attemptId,
+    userId: auth.userId ?? null,
+    credentialsValid: auth.credentialsValid,
+    email: auth.email,
+    deviceId: auth.deviceId,
+    ip: req.ip,
+    userAgent: req.get("user-agent") || "",
   });
+  return { auth, result };
 }
-
 function createMiddleware(suspiciousLogin, options = {}) {
-  const {
-    userIdField = "userId",
-    successField = "success",
-    onBlock = null,
-  } = options;
-
+  if (typeof options.resolveAuthentication !== "function") throw new TypeError("resolveAuthentication is required");
   return async function middleware(req, res, next) {
-    const userId = extractUserId(req, userIdField);
-    if (!userId) return next();
-
-    let result;
     try {
-      result = await runDetection(suspiciousLogin, req, userIdField, successField);
-    } catch {
-      result = { allowed: true, score: 0, level: "low", reasons: [], blocked: false };
+      const { auth, result } = await runDetection(suspiciousLogin, options.resolveAuthentication, req);
+      req.suspiciousLogin = result;
+      if (!auth.credentialsValid) return res.status(401).json({ error: "Authentication failed" });
+      if (!result.allowed) return res.status(403).json({ error: "Login denied" });
+      return next();
+    } catch (error) {
+      return next(error);
     }
-
-    req.suspiciousLogin = result;
-    if (result.blocked) return respondBlocked(res, result, onBlock);
-    next();
   };
 }
-
 module.exports = createMiddleware;

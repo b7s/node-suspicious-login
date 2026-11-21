@@ -14,7 +14,7 @@ const SUSPICIOUS_PATTERNS = [
 ];
 
 class SuspiciousUserAgentCheck extends BaseCheck {
-  async run({ current }) {
+  run({ current }) {
     if (!current.userAgent) return { pontos: 0, motivo: null };
     const isSuspicious = SUSPICIOUS_PATTERNS.some((p) => p.test(current.userAgent));
     if (isSuspicious) {

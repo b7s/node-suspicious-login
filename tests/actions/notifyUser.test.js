@@ -6,7 +6,7 @@ test("sends email and returns notified", async () => {
   const action = new NotifyUser({ transporter, from: "test@test.com" });
 
   const result = await action.execute({
-    userId: "user@example.com",
+    email: "user@example.com",
     ip: "1.2.3.4",
     country: "BR",
     score: 50,
@@ -14,6 +14,7 @@ test("sends email and returns notified", async () => {
   });
 
   expect(sendMail).toHaveBeenCalledTimes(1);
+  expect(sendMail).toHaveBeenCalledWith(expect.objectContaining({ to: "user@example.com", text: expect.stringContaining("1.2.3.4") }));
   expect(result.notified).toBe(true);
   expect(result.blocked).toBe(false);
 });

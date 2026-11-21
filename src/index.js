@@ -42,4 +42,5 @@ module.exports = {
   presets,
   actions,
   engine,
+  GeoLite2City: require("./core/geolocation/geoLite2City"),
 };

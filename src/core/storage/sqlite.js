@@ -1,99 +1,74 @@
 "use strict";
 
-const initSqlJs = require("sql.js");
+const { randomUUID } = require("crypto");
+const { realpathSync } = require("fs");
+const withLock = require("./lock");
+const validatePrune = require("./prune");
+const { migrate } = require("./schema");
+const SqliteQueries = require("./sqliteQueries");
 const BaseStorage = require("./base");
-const fs = require("fs");
 
-class SqliteStorage extends BaseStorage {
-  constructor(dbPath) {
-    super();
-    this.dbPath = dbPath;
-    this.db = null;
-    this._initialized = this._init();
+function openDatabase(path) {
+  if (process.versions.bun) {
+    const { Database } = require("bun:sqlite");
+    return new Database(path, { create: true });
   }
-
-  async _init() {
-    const SQL = await initSqlJs();
-    this.SQL = SQL;
-    let existingData = null;
-    try {
-      existingData = fs.readFileSync(this.dbPath);
-    } catch { /* ignore */ }
-    this.db = new this.SQL.Database(existingData);
-    this._migrate();
-    this._persist();
-  }
-
-  _migrate() {
-    this.db.run(`CREATE TABLE IF NOT EXISTS login_attempts (
-      id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, ip TEXT NOT NULL,
-      user_agent TEXT, country TEXT, device TEXT, success INTEGER NOT NULL DEFAULT 0,
-      score INTEGER NOT NULL DEFAULT 0, reasons TEXT, blocked INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL
-    )`);
-    this.db.run("CREATE INDEX IF NOT EXISTS idx_user ON login_attempts(user_id)");
-    this.db.run("CREATE INDEX IF NOT EXISTS idx_created ON login_attempts(created_at)");
-    this._persist();
-  }
-
-  _persist() {
-    try {
-      fs.writeFileSync(this.dbPath, new Uint8Array(this.db.export()));
-    } catch { /* ignore */ }
-  }
-
-  async create(data) {
-    await this._ready();
-    const row = this._insertAttempt(data);
-    this._persist();
-    return this._rowToObject(row);
-  }
-
-  _insertAttempt(data) {
-    const params = this._buildParams(data);
-    this.db.run(this._insertSql(), params);
-    return this.db.prepare("SELECT * FROM login_attempts WHERE id = (SELECT MAX(id) FROM login_attempts)").get();
-  }
-
-  _buildParams(data) {
-    return [
-      data.user_id, data.ip, data.user_agent || null, data.country || null,
-      data.device, this._flag(data.success), data.score || 0,
-      JSON.stringify(data.reasons || []), this._flag(data.blocked), data.created_at,
-    ];
-  }
-
-  _flag(value) {
-    return value ? 1 : 0;
-  }
-
-  _insertSql() {
-    return `INSERT INTO login_attempts (user_id, ip, user_agent, country, device, success, score, reasons, blocked, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
-  }
-
-  async listByUser(userId) {
-    await this._ready();
-    const rows = this.db.prepare("SELECT * FROM login_attempts WHERE user_id = ? ORDER BY created_at DESC").all(userId);
-    return rows.map((r) => this._rowToObject(r));
-  }
-
-  async close() {
-    if (this.db) {
-      this._persist();
-      this.db.close();
-    }
-  }
-
-  _rowToObject(row) {
-    if (!row) return null;
-    return {
-      id: row.id, user_id: row.user_id, ip: row.ip, user_agent: row.user_agent,
-      country: row.country, device: row.device, success: !!row.success, score: row.score,
-      reasons: row.reasons ? JSON.parse(row.reasons) : [], blocked: !!row.blocked,
-      created_at: row.created_at,
-    };
-  }
+  const { DatabaseSync } = require("node:sqlite");
+  return new DatabaseSync(path);
 }
 
+function decoded(row) {
+  if (!row) return null;
+  let reasons = row.reasons;
+  try { reasons = JSON.parse(reasons); } catch { /* preserve invalid legacy data */ }
+  return { ...row, success: Boolean(row.success), blocked: Boolean(row.blocked), reasons };
+}
+
+function rowDefaults(data) {
+  return { score: data.score ?? 0, level: data.level ?? "low", reasons: JSON.stringify(data.reasons ?? []) };
+}
+class SqliteStorage extends BaseStorage {
+  constructor(dbPath = "suspicious-login.sqlite") {
+    super();
+    this.db = openDatabase(dbPath);
+    this.lockKey = dbPath === ":memory:" ? randomUUID() : realpathSync(dbPath);
+    this.db.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = DELETE");
+    this.prepare = (sql) => this.db.prepare(sql);
+    this.queries = new SqliteQueries(this.prepare);
+    try { this.migrate(); } catch (error) { this.db.close(); throw error; }
+  }
+  migrate() { migrate(this.db, this.prepare); }
+  withTransaction(callback) {
+    return withLock(this.lockKey, () => this.runTransaction(callback));
+  }
+  async runTransaction(callback) {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = await callback(this.queries);
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+  async create(data) {
+    const row = { first_login: 0, ...data, attempt_id: data.attempt_id || randomUUID(), legacy: 0,
+      success: Number(Boolean(data.success)), blocked: Number(Boolean(data.blocked)),
+      ...rowDefaults(data),
+      created_at: data.created_at || new Date().toISOString() };
+    return decoded(await this.withTransaction((tx) => tx.insert(row)));
+  }
+  readDecision(id) { return withLock(this.lockKey, () => this.queries.decision(id)); }
+  listByUser(userId) {
+    return this.prepare("SELECT * FROM login_attempts WHERE user_id = ? ORDER BY created_at DESC, id DESC")
+      .all(userId).map(decoded);
+  }
+  prune({ before, limit }) {
+    validatePrune({ before, limit });
+    return this.withTransaction(() => this.prepare("DELETE FROM login_attempts WHERE id IN (SELECT id FROM login_attempts WHERE created_at < ? ORDER BY created_at, id LIMIT ?)")
+      .run(before, limit).changes);
+  }
+  close() { return withLock(this.lockKey, () => this.db.close()); }
+}
 module.exports = SqliteStorage;

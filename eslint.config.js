@@ -45,6 +45,10 @@ export default [
     },
   },
   {
+    files: ["benchmarks/**/*.js"],
+    languageOptions: { sourceType: "commonjs", globals: nodeGlobals },
+  },
+  {
     files: ["tests/**/*.js"],
     languageOptions: {
       ecmaVersion: 2023,

@@ -1,13 +1,8 @@
 "use strict";
-
-const BaseCheck = require("./base");
-
-class NewIpCheck extends BaseCheck {
-  async run({ history, current }) {
-    const known = history.some((h) => h.ip === current.ip);
-    if (known) return { pontos: 0, motivo: null };
-    return { pontos: 10, motivo: "new_ip" };
+class NewIpCheck {
+  run({ current, evidence }) {
+    if (evidence.hasEligible && current.ip && !evidence.knownIp) return { pontos: 10, motivo: "new_ip" };
+    return { pontos: 0, motivo: null };
   }
 }
-
 module.exports = NewIpCheck;

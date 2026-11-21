@@ -10,15 +10,14 @@ class NotifyUserAction extends BaseAction {
     this.appUrl = options.appUrl || "http://localhost:3000";
   }
 
-  async execute({ userId, ip, country, score, level }) {
-    if (!this.transporter) return { blocked: false, notified: false };
+  async execute({ email, ip, country, score, level }) {
+    if (!this.transporter || !email) return { blocked: false, notified: false };
 
     await this.transporter.sendMail({
       from: this.from,
-      to: userId,
+      to: email,
       subject: `Suspicious login detected (${level})`,
       text: `A suspicious login was detected from IP ${ip}${country ? ` in ${country}` : ""}. Score: ${score}. Level: ${level}.`,
-      html: `<p>Suspicious login detected.</p><p>IP: ${ip}</p><p>Country: ${country || "unknown"}</p><p>Score: ${score}</p><p>Level: ${level}</p>`,
     });
 
     return { blocked: false, notified: true };

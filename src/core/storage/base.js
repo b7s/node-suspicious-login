@@ -1,15 +1,9 @@
 "use strict";
 
 class BaseStorage {
-  async create() {
-    throw new Error("create not implemented");
-  }
-  async listByUser() {
-    throw new Error("listByUser not implemented");
-  }
-  async close() {
-    return;
-  }
+  async migrate() { throw new Error("migrate not implemented"); }
+  async withTransaction() { throw new Error("withTransaction not implemented"); }
+  async prune() { throw new Error("prune not implemented"); }
+  async close() { throw new Error("close not implemented"); }
 }
-
 module.exports = BaseStorage;

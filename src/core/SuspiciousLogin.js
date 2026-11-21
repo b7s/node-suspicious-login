@@ -1,100 +1,78 @@
 "use strict";
 
 const EventEmitter = require("events");
-const engine = require("./scoring/engine");
+const { setImmediate } = require("timers");
+const SqliteStorage = require("./storage/sqlite");
+const GeoLite2City = require("./geolocation/geoLite2City");
+const resolveLocation = require("./geolocation/resolve");
+const { attempt, withLocation } = require("./attempt");
+const configure = require("./config");
+const { execute, replay } = require("./scoring/transaction");
+
+function operationalOptions(options) {
+  return { locationTimeoutMs: options.locationTimeoutMs ?? 1000, actions: options.actions || {},
+    onEffectError: options.onEffectError || ((error) => process.emitWarning(error)) };
+}
+class DetectionError extends Error {
+  constructor(cause) { super("Suspicious login detection failed", { cause }); this.name = "DetectionError"; }
+}
 class SuspiciousLogin extends EventEmitter {
+  static async open(options = {}) {
+    const ipProvider = options.ipProvider || (options.geoLite2Path ? await GeoLite2City.open(options.geoLite2Path) : undefined);
+    return new SuspiciousLogin({ ...options, ipProvider });
+  }
   constructor(options = {}) {
     super();
-    this.storage = options.storage;
-    this.preset = options.preset;
-    this.checks = options.checks || [];
+    Object.assign(this, configure(options), operationalOptions(options));
+    this.storage = options.storage || new SqliteStorage(options.dbPath);
     this.ipProvider = options.ipProvider;
-    this.firstLoginGrace = options.firstLoginGrace !== false;
-    this.actionInstances = options.actions || {};
+    if (!Number.isFinite(this.locationTimeoutMs) || this.locationTimeoutMs <= 0) throw new TypeError("Invalid location timeout");
   }
-
-  async detect({ userId, ip, userAgent, success = false }) {
-    const history = await this._getHistory(userId);
-    if (this._isFirstLogin(history)) {
-      return this._handleFirstLogin({ userId, ip, userAgent, success });
+  async detect(input) {
+    const current = attempt(input);
+    try {
+      return await this.decide(current);
+    } catch (error) {
+      throw new DetectionError(error);
     }
-
-    const country = await this._resolveCountry(ip);
-    const current = { ip, userAgent, country, device: `${userAgent}|${ip}`, success };
-    const context = { history, current };
-
-    const results = await this._runChecks(context);
-    const { score, level, reasons } = this._score(results);
-
-    const { blocked, notified } = await this._executeActions(
-      this.preset.actionsForLevel(level) || [], context, { score, level, reasons }
-    );
-
-    await this._recordAttempt({ userId, ip, userAgent, country, device: context.device, success, score, reasons, blocked });
-
-    if (level !== "low") this._emitEvent({ userId, ip, userAgent, country, device: context.device, score, level, reasons, success, blocked, notified });
-
-    return { allowed: !blocked, score, level, reasons, blocked, notified, firstLogin: false };
   }
-
-  _isFirstLogin(history) {
-    return history.length === 0 && this.firstLoginGrace;
-  }
-  async _getHistory(userId) {
-    return this.storage ? await this.storage.listByUser(userId) : [];
-  }
-
-  async _handleFirstLogin({ userId, ip, userAgent, success }) {
-    const device = `${userAgent}|${ip}`;
-    await this._recordAttempt({ userId, ip, userAgent, country: null, device, success, score: 0, reasons: [], blocked: false });
-    return { allowed: true, score: 0, level: "low", reasons: [], blocked: false, notified: false, firstLogin: true };
-  }
-
-  async _resolveCountry(ip) {
-    return this.ipProvider ? await this.ipProvider.lookup(ip) : undefined;
-  }
-
-  async _runChecks(context) {
-    const results = [];
-    for (const check of this.checks) {
-      const result = await check.run(context);
-      if (result && result.pontos > 0) results.push(result);
+  async decide(current) {
+    if (this.shouldLocate(current)) {
+      const previous = await this.readReplay(current);
+      if (previous) return previous;
+      const location = await resolveLocation(this.ipProvider, current.ip, this.locationTimeoutMs, (error) => this.report(error));
+      current = withLocation(current, location);
     }
-    return results;
+    const { result, actionNames } = await this.storage.withTransaction((tx) => execute(tx, current, this));
+    if (!result.duplicate && result.level !== "low") this.dispatch(current, result, actionNames);
+    return result;
   }
-
-  _score(results) {
-    const score = results.reduce((sum, r) => sum + r.pontos, 0);
-    const level = engine.classify(score, this.preset);
-    const reasons = results.map((r) => r.motivo);
-    return { score, level, reasons };
+  shouldLocate(current) { return current.credentialsValid && current.ip && this.ipProvider; }
+  async readReplay(current) {
+    const id = current.attemptId;
+    const previous = typeof this.storage.readDecision === "function"
+      ? await this.storage.readDecision(id) : await this.storage.withTransaction((tx) => tx.decision(id));
+    return replay(previous, current);
   }
-
-  async _executeActions(actionNames, context, extra) {
-    let blocked = false;
-    let notified = false;
-    for (const name of actionNames) {
-      const action = this.actionInstances[name];
-      if (!action) continue;
-      const outcome = await action.execute({ ...context, ...extra });
-      if (outcome.blocked) blocked = true;
-      if (outcome.notified) notified = true;
-    }
-    return { blocked, notified };
+  dispatch(current, result, actionNames) {
+    const payload = { ...current, ...result, reasons: [...result.reasons] };
+    setImmediate(() => this.runEffect(() => {
+      for (const name of actionNames) {
+        if (name === "block_login") continue;
+        this.runEffect(() => this.actions[name]?.execute({ ...payload }));
+      }
+      for (const listener of this.rawListeners("SuspiciousLoginDetected")) {
+        this.runEffect(() => listener.call(this, { ...payload }));
+      }
+    }));
   }
-
-  async _recordAttempt({ userId, ip, userAgent, country, device, success, score, reasons, blocked }) {
-    if (!this.storage) return;
-    await this.storage.create({
-      user_id: userId, ip, user_agent: userAgent, country: country || null, device,
-      success: !!success, score: score || 0, reasons: JSON.stringify(reasons || []),
-      blocked: !!blocked, created_at: new Date().toISOString(),
-    });
+  runEffect(effect) {
+    Promise.resolve().then(effect).catch((error) => this.report(error));
   }
-
-  _emitEvent(data) {
-    this.emit("SuspiciousLoginDetected", data);
+  report(error) {
+    try { Promise.resolve(this.onEffectError(error)).catch(() => undefined); } catch { /* reporting is independent of the decision */ }
   }
+  async close() { await this.storage.close(); }
 }
-
+SuspiciousLogin.DetectionError = DetectionError;
 module.exports = SuspiciousLogin;

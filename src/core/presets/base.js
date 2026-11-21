@@ -3,7 +3,11 @@
 class BasePreset {
   constructor() {
     this.thresholds = { medium: 40, high: 70 };
-    this.actionsMap = {};
+    this.actionsMap = {
+      low: [],
+      medium: ["notify_user"],
+      high: ["notify_user", "block_login"],
+    };
   }
 
   actionsForLevel(level) {
